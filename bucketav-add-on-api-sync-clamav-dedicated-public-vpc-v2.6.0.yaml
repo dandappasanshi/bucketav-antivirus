@@ -1,0 +1,2039 @@
+---
+# Copyright widdix GmbH
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT 
+# OLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+Description: bucketAV powered by ClamAV - Synchronous HTTPS API Add-On for Amazon S3 (dedicated VPC; scanners run in public subnets)
+AWSTemplateFormatVersion: "2010-09-09"
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Required Parameters
+        Parameters:
+          - BucketAVStackName
+          - KeyName
+          - ApiKeys
+          - DnsConfiguration
+      - Label:
+          default: DNS Parameters
+        Parameters:
+          - HostedZoneId
+          - DomainName
+          - CertificateArn
+      - Label:
+          default: API Parameters
+        Parameters:
+          - AccessLogsBucketName
+          - AccessLogsPrefix
+      - Label:
+          default: Scan Parameters
+        Parameters:
+          - EnableCache
+          - AdditionalDatabaseUrls
+      - Label:
+          default: VPC Parameters
+        Parameters:
+          - VpcCidrBlock
+          - VpcSubnetCidrBits
+          - SSHIngressCidrIp
+          - FlowLogRetentionInDays
+          - ApiIngressCidrIp
+      - Label:
+          default: EC2 Parameters
+        Parameters:
+          - InstanceType
+          - LogsRetentionInDays
+          - SystemsManagerAccess
+      - Label:
+          default: Auto Scaling Group Parameters
+        Parameters:
+          - AutoScalingMinSize
+          - AutoScalingMaxSize
+      - Label:
+          default: Permissions Parameters
+        Parameters:
+          - ManagedPolicyArns
+          - S3BucketRestriction
+          - S3ObjectRestriction
+          - KMSKeyRestriction
+          - PermissionsBoundary
+Parameters:
+  BucketAVStackName:
+    Type: String
+    Description: CloudFormation stack name of bucketAV (if you followed our docs, the name is bucketav, or s3-virusscan for older installations)
+  ApiKeys:
+    Type: String
+    Description: API keys for authenticating client requests using Bearer Authentication. Separate API keys with a comma (e.g., key1,key2).
+    NoEcho: true
+  DnsConfiguration:
+    Type: String
+    Default: AUTO_ROUTE_53
+    AllowedValues:
+      - AUTO_ROUTE_53
+      - MANUAL
+    Description: Do you want to configure Route 53 and the Certificate Manager public certificate automatically or do zou prefer a manual approach?
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: Route 53 public hosted zone ID (required if DnsConfiguration:=AUTO_ROUTE_53).
+  DomainName:
+    Type: String
+    Default: ""
+    Description: Domain name added to Route 53 public hosted zone and Certificate Manager public certificate (required if DnsConfiguration:=AUTO_ROUTE_53).
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: ACM public certificate ARN (required if DnsConfiguration:=MANUAL).
+  AccessLogsBucketName:
+    Type: String
+    Default: ""
+    Description: Optional bucket name to store access logs (leave empty to disable; bucket polic must allow access for log delivery as described here https://docs.aws.amazon.com/elasticloadbalancing/latest/application/enable-access-logging.html#attach-bucket-policy).
+  AccessLogsPrefix:
+    Type: String
+    Default: ""
+    Description: Optional access logs prefix.
+  AutoScalingMinSize:
+    Type: Number
+    Default: 2
+    ConstraintDescription: Must be >= 2
+    Description: Minimum number of EC2 instances scanning files.
+    MinValue: 2
+  AutoScalingMaxSize:
+    Type: Number
+    Default: 2
+    ConstraintDescription: Must be >= 2
+    Description: Maximum number of EC2 instances scanning files.
+    MinValue: 2
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "Name of the EC2 key pair to log in via SSH (username: ec2-user)."
+  LogsRetentionInDays:
+    Type: Number
+    Default: 14
+    AllowedValues:
+      - 1
+      - 3
+      - 5
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 120
+      - 150
+      - 180
+      - 365
+      - 400
+      - 545
+      - 731
+      - 1827
+      - 3653
+    Description: Specifies the number of days you want to retain log events.
+  SystemsManagerAccess:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enable AWS Systems Manager Session Manager to connect to the EC2 instances. To fully enable SSM, add arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore to the ManagedPolicyArns configuration parameter as well.
+  ManagedPolicyArns:
+    Type: String
+    Default: ""
+    Description: Optional comma-delimited list of IAM managed policy ARNs to attach to the IAM role of the EC2 instances.
+  S3BucketRestriction:
+    Type: CommaDelimitedList
+    Default: "*"
+    Description: Restrict access to specific S3 buckets (e.g. arn:aws:s3:::bucket-a,arn:aws:s3:::bucket-b or * to allow access to all S3 buckets).
+  S3ObjectRestriction:
+    Type: CommaDelimitedList
+    Default: "*"
+    Description: Restrict access to specific S3 objects (e.g. arn:aws:s3:::bucket-a/*,arn:aws:s3:::bucket-b/* or * to allow access to all S3 objects).
+  KMSKeyRestriction:
+    Type: CommaDelimitedList
+    Default: "*"
+    Description: Restrict access to specific KMS keys (e.g. arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab,arn:aws:kms:us-east-1:111122223333:key/0987dcba-09fe-87dc-65ba-ab0987654321 or * to allow access to all KMS keys).
+  PermissionsBoundary:
+    Type: String
+    Default: ""
+    Description: Optional IAM policy ARN that will be used as the permissions boundary for all roles.
+  SSHIngressCidrIp:
+    Type: String
+    Default: ""
+    Description: "Optional ingress rule allows SSH access from this IP address range (e.g., access from anywhere: 0.0.0.0/0, from single public IP address 91.45.138.21/32)."
+  VpcCidrBlock:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: The IPv4 network range for the VPC, in CIDR notation (e.g., 10.0.0.0/16).
+  ApiIngressCidrIp:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: "Ingress rule allows HTTP(S) access from this IP address range (e.g., access from anywhere: 0.0.0.0/0, from single public IP address 91.45.138.21/32)."
+  VpcSubnetCidrBits:
+    Type: Number
+    Default: 12
+    Description: The number of subnet bits for the CIDR (e.g., a value 8 will create a CIDR with a mask of /24).
+    MaxValue: 14
+    MinValue: 6
+  FlowLogRetentionInDays:
+    Type: Number
+    Default: 14
+    AllowedValues:
+      - 0
+      - 1
+      - 3
+      - 5
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 120
+      - 150
+      - 180
+      - 365
+      - 400
+      - 545
+      - 731
+      - 1827
+      - 3653
+    Description: Specifies the number of days you want to retain VPC Flow Log events (set to 0 to disable).
+  InstanceType:
+    Type: String
+    Default: m5.large
+    AllowedValues:
+      - t3a.small
+      - t3a.medium
+      - t3a.large
+      - t3a.xlarge
+      - t3a.2xlarge
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+      - m7a.medium
+      - m7a.large
+      - m7a.xlarge
+      - m7a.2xlarge
+      - m7a.4xlarge
+      - m7a.8xlarge
+      - m7a.12xlarge
+      - m7a.16xlarge
+      - m7a.24xlarge
+      - m7a.32xlarge
+      - m7a.48xlarge
+      - m7i.large
+      - m7i.xlarge
+      - m7i.2xlarge
+      - m7i.4xlarge
+      - m7i.8xlarge
+      - m7i.12xlarge
+      - m7i.16xlarge
+      - m7i.24xlarge
+      - m7i.48xlarge
+      - m6a.large
+      - m6a.xlarge
+      - m6a.2xlarge
+      - m6a.4xlarge
+      - m6a.8xlarge
+      - m6a.12xlarge
+      - m6a.16xlarge
+      - m6a.24xlarge
+      - m6a.32xlarge
+      - m6a.48xlarge
+      - m6i.large
+      - m6i.xlarge
+      - m6i.2xlarge
+      - m6i.4xlarge
+      - m6i.8xlarge
+      - m6i.12xlarge
+      - m6i.16xlarge
+      - m6i.24xlarge
+      - m6i.32xlarge
+      - m5a.large
+      - m5a.xlarge
+      - m5a.2xlarge
+      - m5a.4xlarge
+      - m5a.8xlarge
+      - m5a.12xlarge
+      - m5a.16xlarge
+      - m5a.24xlarge
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+      - m5.8xlarge
+      - m5.12xlarge
+      - m5.16xlarge
+      - m5.24xlarge
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+      - m4.4xlarge
+      - m4.10xlarge
+      - m4.16xlarge
+      - c7a.medium
+      - c7a.large
+      - c7a.xlarge
+      - c7a.2xlarge
+      - c7a.4xlarge
+      - c7a.8xlarge
+      - c7a.12xlarge
+      - c7a.16xlarge
+      - c7a.24xlarge
+      - c7a.32xlarge
+      - c7a.48xlarge
+      - c7i.large
+      - c7i.xlarge
+      - c7i.2xlarge
+      - c7i.4xlarge
+      - c7i.8xlarge
+      - c7i.12xlarge
+      - c7i.16xlarge
+      - c7i.24xlarge
+      - c7i.48xlarge
+      - c6a.large
+      - c6a.xlarge
+      - c6a.2xlarge
+      - c6a.4xlarge
+      - c6a.8xlarge
+      - c6a.12xlarge
+      - c6a.16xlarge
+      - c6a.24xlarge
+      - c6a.32xlarge
+      - c6a.48xlarge
+      - c6i.large
+      - c6i.xlarge
+      - c6i.2xlarge
+      - c6i.4xlarge
+      - c6i.8xlarge
+      - c6i.12xlarge
+      - c6i.16xlarge
+      - c6i.24xlarge
+      - c6i.32xlarge
+      - c5a.large
+      - c5a.xlarge
+      - c5a.2xlarge
+      - c5a.4xlarge
+      - c5a.8xlarge
+      - c5a.12xlarge
+      - c5a.16xlarge
+      - c5a.24xlarge
+      - c5.large
+      - c5.xlarge
+      - c5.2xlarge
+      - c5.4xlarge
+      - c5.9xlarge
+      - c5.12xlarge
+      - c5.18xlarge
+      - c5.24xlarge
+    Description: Specifies the instance type of the EC2 instance (low performance for t3a.small and t3.small)
+  EnableCache:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enable cache checks for hash sums of scanned files (disable only during performance tests).
+  AdditionalDatabaseUrls:
+    Type: String
+    Default: ""
+    Description: Optional comma-delimited list of ClamAV database files available via http(s).
+Conditions:
+  HasDnsConfigurationAutoRoute53:
+    Fn::Equals:
+      - Ref: DnsConfiguration
+      - AUTO_ROUTE_53
+  HasDnsConfigurationManual:
+    Fn::Equals:
+      - Ref: DnsConfiguration
+      - MANUAL
+  HasAccessLogsBucketName:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: AccessLogsBucketName
+          - ""
+  HasAccessLogsPrefix:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: AccessLogsPrefix
+          - ""
+  HasAccessLogsBucketNameAndPrefix:
+    Fn::And:
+      - Condition: HasAccessLogsBucketName
+      - Condition: HasAccessLogsPrefix
+  HasManagedPolicyArns:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ManagedPolicyArns
+          - ""
+  HasSystemsManagerAccess:
+    Fn::Equals:
+      - Ref: SystemsManagerAccess
+      - "true"
+  HasPermissionsBoundary:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: PermissionsBoundary
+          - ""
+  HasSSHIngressCidrIp:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: SSHIngressCidrIp
+          - ""
+  HasFlowLogs:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: FlowLogRetentionInDays
+          - "0"
+Resources:
+  ApiKeysParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: bucketAV managed value. DO NOT CHANGE!
+      Name:
+        Fn::Join:
+          - ""
+          - - /bucketAV/
+            - Ref: BucketAVStackName
+            - /AddOn/api-sync/
+            - Ref: AWS::StackName
+            - /ApiKeys
+      Type: StringList
+      Value:
+        Ref: ApiKeys
+  SignaturesAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Fn::ImportValue:
+            Fn::Join:
+              - ""
+              - - Ref: BucketAVStackName
+                - -InfrastructureAlarmsTopicArn
+      AlarmDescription: Signatures are older than 7 days. Are signature updates working? Please follow https://bucketav.com/help/operations/monitoring-alerting.html#signaturesagealarm
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: signatures_age
+      Namespace:
+        Ref: AWS::StackName
+      Period: 600
+      Statistic: Maximum
+      Threshold: 604800
+      TreatMissingData: notBreaching
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays:
+        Ref: LogsRetentionInDays
+  ScanIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        Fn::If:
+          - HasManagedPolicyArns
+          - Fn::Split:
+              - ","
+              - Ref: ManagedPolicyArns
+          - Ref: AWS::NoValue
+      PermissionsBoundary:
+        Fn::If:
+          - HasPermissionsBoundary
+          - Ref: PermissionsBoundary
+          - Ref: AWS::NoValue
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject*
+                Resource:
+                  Ref: S3ObjectRestriction
+              - Effect: Allow
+                Action: s3:ListBucket*
+                Resource:
+                  Ref: S3BucketRestriction
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource:
+                  Ref: KMSKeyRestriction
+          PolicyName: s3read
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  Fn::Join:
+                    - ""
+                    - - "arn:"
+                      - Ref: AWS::Partition
+                      - ":ssm:"
+                      - Ref: AWS::Region
+                      - ":"
+                      - Ref: AWS::AccountId
+                      - :parameter
+                      - Ref: ApiKeysParameter
+          PolicyName: ssmparam
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace:
+                      Ref: AWS::StackName
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  Fn::GetAtt:
+                    - Logs
+                    - Arn
+              - Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: "*"
+          PolicyName: cloudwatch
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: autoscaling:DescribeAutoScalingInstances
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - autoscaling:CompleteLifecycleAction
+                  - autoscaling:RecordLifecycleActionHeartbeat
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    autoscaling:ResourceTag/aws:cloudformation:stack-id:
+                      Ref: AWS::StackId
+          PolicyName: asg
+        - Fn::If:
+            - HasSystemsManagerAccess
+            - PolicyName: ssmv2
+              PolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                  - Effect: Allow
+                    Action:
+                      - ssm:UpdateInstanceInformation
+                      - ssm:ListAssociations
+                      - ssm:ListInstanceAssociations
+                      - ssmmessages:CreateControlChannel
+                      - ssmmessages:CreateDataChannel
+                      - ssmmessages:OpenControlChannel
+                      - ssmmessages:OpenDataChannel
+                      - ec2messages:AcknowledgeMessage
+                      - ec2messages:DeleteMessage
+                      - ec2messages:FailMessage
+                      - ec2messages:GetEndpoint
+                      - ec2messages:GetMessages
+                      - ec2messages:SendReply
+                    Resource: "*"
+            - Ref: AWS::NoValue
+  ScanInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: ScanIAMRole
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock:
+        Ref: VpcCidrBlock
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value:
+            Ref: AWS::StackName
+  FlowLogLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays:
+        Ref: FlowLogRetentionInDays
+    Condition: HasFlowLogs
+  FlowLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      PermissionsBoundary:
+        Fn::If:
+          - HasPermissionsBoundary
+          - Ref: PermissionsBoundary
+          - Ref: AWS::NoValue
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource:
+                  Fn::GetAtt:
+                    - FlowLogLogGroup
+                    - Arn
+          PolicyName: flowlogs-policy
+    Condition: HasFlowLogs
+  FlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn:
+        Fn::GetAtt:
+          - FlowLogRole
+          - Arn
+      LogGroupName:
+        Ref: FlowLogLogGroup
+      ResourceId:
+        Ref: VPC
+      ResourceType: VPC
+      TrafficType: ALL
+    Condition: HasFlowLogs
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Ref: AWS::StackName
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+        Ref: InternetGateway
+      VpcId:
+        Ref: VPC
+  SubnetAPublic:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ""
+      CidrBlock:
+        Fn::Select:
+          - 0
+          - Fn::Cidr:
+              - Fn::GetAtt:
+                  - VPC
+                  - CidrBlock
+              - 4
+              - Ref: VpcSubnetCidrBits
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - ""
+              - - Ref: AWS::StackName
+                - ": A public"
+      VpcId:
+        Ref: VPC
+  SubnetBPublic:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs: ""
+      CidrBlock:
+        Fn::Select:
+          - 2
+          - Fn::Cidr:
+              - Fn::GetAtt:
+                  - VPC
+                  - CidrBlock
+              - 4
+              - Ref: VpcSubnetCidrBits
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - ""
+              - - Ref: AWS::StackName
+                - ": B public"
+      VpcId:
+        Ref: VPC
+  RouteTableAPublic:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - ""
+              - - Ref: AWS::StackName
+                - ": A public"
+      VpcId:
+        Ref: VPC
+  RouteTableBPublic:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - ""
+              - - Ref: AWS::StackName
+                - ": B public"
+      VpcId:
+        Ref: VPC
+  RouteTableAssociationAPublic:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RouteTableAPublic
+      SubnetId:
+        Ref: SubnetAPublic
+  RouteTableAssociationBPublic:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RouteTableBPublic
+      SubnetId:
+        Ref: SubnetBPublic
+  RouteTableAPublicInternetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+      RouteTableId:
+        Ref: RouteTableAPublic
+    DependsOn:
+      - VPCGatewayAttachment
+  RouteTableBPublicInternetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+      RouteTableId:
+        Ref: RouteTableBPublic
+    DependsOn:
+      - VPCGatewayAttachment
+  NetworkAclPublic:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - ""
+              - - Ref: AWS::StackName
+                - ": public"
+      VpcId:
+        Ref: VPC
+  SubnetNetworkAclAssociationAPublic:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      SubnetId:
+        Ref: SubnetAPublic
+  SubnetNetworkAclAssociationBPublic:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      SubnetId:
+        Ref: SubnetBPublic
+  NetworkAclEntryInPublicAllowEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: false
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      PortRange:
+        From: 1024
+        To: 65535
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 50
+  NetworkAclEntryInPublicAllowSSH:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock:
+        Ref: SSHIngressCidrIp
+      Egress: false
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      PortRange:
+        From: 22
+        To: 22
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 60
+    Condition: HasSSHIngressCidrIp
+  NetworkAclEntryOutPublicAllowEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock:
+        Ref: SSHIngressCidrIp
+      Egress: true
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      PortRange:
+        From: 32768
+        To: 65535
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 50
+    Condition: HasSSHIngressCidrIp
+  NetworkAclEntryOutPublicAllowHTTP:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: true
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      PortRange:
+        From: 80
+        To: 80
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 60
+  NetworkAclEntryOutPublicAllowHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: true
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      PortRange:
+        From: 443
+        To: 443
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 61
+  NetworkAclEntryInPublicAllowHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock:
+        Ref: ApiIngressCidrIp
+      Egress: false
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      PortRange:
+        From: 443
+        To: 443
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 70
+  NetworkAclEntryOutPublicAllowEphemeral2:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock:
+        Ref: ApiIngressCidrIp
+      Egress: true
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      PortRange:
+        From: 1024
+        To: 65535
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 70
+  NetworkAclEntryOutPublicAllow8080:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock:
+        Fn::GetAtt:
+          - VPC
+          - CidrBlock
+      Egress: true
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      PortRange:
+        From: 8080
+        To: 8080
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 71
+  NetworkAclEntryInPublicAllow8080:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock:
+        Fn::GetAtt:
+          - VPC
+          - CidrBlock
+      Egress: false
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      PortRange:
+        From: 8080
+        To: 8080
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 71
+  NetworkAclEntryOutPublicAllowEphemeral3:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock:
+        Fn::GetAtt:
+          - VPC
+          - CidrBlock
+      Egress: true
+      NetworkAclId:
+        Ref: NetworkAclPublic
+      PortRange:
+        From: 1024
+        To: 65535
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 72
+  ScanSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        Fn::Join:
+          - ""
+          - - Ref: AWS::StackName
+            - -scan
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: Accessing Amazon Linux repos.
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - CidrIp: 0.0.0.0/0
+          Description: Accessing AWS APIs and fetching virus database updates.
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+      VpcId:
+        Ref: VPC
+  ScanSecurityGroupInSSH:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      CidrIp:
+        Ref: SSHIngressCidrIp
+      FromPort: 22
+      GroupId:
+        Ref: ScanSecurityGroup
+      IpProtocol: tcp
+      ToPort: 22
+    Condition: HasSSHIngressCidrIp
+  ApiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        Fn::Join:
+          - ""
+          - - Ref: AWS::StackName
+            - -https-api
+      SecurityGroupEgress:
+        - DestinationSecurityGroupId:
+            Ref: ScanSecurityGroup
+          FromPort: 8080
+          IpProtocol: tcp
+          ToPort: 8080
+      SecurityGroupIngress:
+        - CidrIp:
+            Ref: ApiIngressCidrIp
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+      VpcId:
+        Ref: VPC
+  ScanSecurityGroupInApiSecurityGroup:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      FromPort: 8080
+      GroupId:
+        Ref: ScanSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId:
+        Ref: ApiSecurityGroup
+      ToPort: 8080
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 15
+      HealthCheckPath: /healthz
+      HealthCheckPort: "8080"
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "204"
+      Port: 8080
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "0"
+        - Key: load_balancing.algorithm.type
+          Value: least_outstanding_requests
+      UnhealthyThresholdCount: 2
+      VpcId:
+        Ref: VPC
+  ScanLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              Encrypted: true
+              VolumeSize: 32
+              VolumeType: gp3
+        IamInstanceProfile:
+          Name:
+            Ref: ScanInstanceProfile
+        ImageId:
+          Fn::FindInMap:
+            - RegionMap
+            - Ref: AWS::Region
+            - AMI
+        InstanceType:
+          Ref: InstanceType
+        KeyName:
+          Ref: KeyName
+        MetadataOptions:
+          HttpTokens: required
+        NetworkInterfaces:
+          - AssociatePublicIpAddress: true
+            DeviceIndex: 0
+            Groups:
+              - Ref: ScanSecurityGroup
+        UserData:
+          Fn::Base64:
+            Fn::Join:
+              - ""
+              - - |-
+                  #!/bin/bash -ex
+                  trap '/opt/aws/bin/cfn-signal -e 1 --stack 
+                - Ref: AWS::StackName
+                - " --resource ScanAutoScalingGroup --region "
+                - Ref: AWS::Region
+                - |-
+                  ' ERR
+                  if [[ "
+                - Ref: EnableCache
+                - |-
+                  " == "false" ]]; then
+                    echo "DisableCache yes" >> /etc/clamd.d/scan.conf
+                  fi
+                  systemctl enable clamd@scan.service
+                  systemctl start clamd@scan.service
+                  IFS="," read -r -a urls <<< "
+                - Ref: AdditionalDatabaseUrls
+                - |-
+                  "
+                  for url in "${urls[@]}"; do echo "DatabaseCustomURL ${url}" >> /etc/freshclam.conf; done
+                  echo "DatabaseMirror https://bucketav-clamav-mirror-
+                - Ref: AWS::Region
+                - .s3.
+                - Ref: AWS::Region
+                - |-
+                  .amazonaws.com" >> /etc/freshclam.conf
+                  systemctl enable clamav-freshclam.service
+                  systemctl start clamav-freshclam.service
+                  cat <<"EOF" | tee /opt/bucketav/bucketav.conf > /dev/null
+                  mode: server
+                  region: '
+                - Ref: AWS::Region
+                - |-
+                  '
+                  stack_name: '
+                - Ref: AWS::StackName
+                - |-
+                  '
+                  core_stack_name: '
+                - Ref: BucketAVStackName
+                - |-
+                  '
+                  addon_stack_name: '
+                - Ref: AWS::StackName
+                - |-
+                  '
+                  debug: false
+                  EOF
+                  chown ec2-user:ec2-user /opt/bucketav/bucketav.conf
+                  sed -e 's/__LOG_GROUP_NAME__/
+                - Ref: Logs
+                - |-
+                  /g' -i /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+                  sed -e 's/__NAMESPACE__/
+                - Ref: AWS::StackName
+                - |-
+                  /g' -i /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+                  systemctl enable amazon-cloudwatch-agent
+                  systemctl start amazon-cloudwatch-agent
+                  systemctl enable bucketav
+                  systemctl start bucketav
+                  if [[ "
+                - Ref: SystemsManagerAccess
+                - |-
+                  " == "true" ]]; then
+                    systemctl enable amazon-ssm-agent
+                    systemctl start amazon-ssm-agent
+                  fi
+                  /opt/aws/bin/cfn-signal -e 0 --stack 
+                - Ref: AWS::StackName
+                - " --resource ScanAutoScalingGroup --region "
+                - Ref: AWS::Region
+                - "\n"
+  ScanAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      HealthCheckGracePeriod: 300
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId:
+          Ref: ScanLaunchTemplate
+        Version:
+          Fn::GetAtt:
+            - ScanLaunchTemplate
+            - LatestVersionNumber
+      LifecycleHookSpecificationList:
+        - DefaultResult: CONTINUE
+          HeartbeatTimeout: 432
+          LifecycleHookName: bucketav_terminate_gracefully
+          LifecycleTransition: autoscaling:EC2_INSTANCE_TERMINATING
+      MaxSize:
+        Ref: AutoScalingMaxSize
+      MetricsCollection:
+        - Granularity: 1Minute
+          Metrics:
+            - GroupInServiceInstances
+            - GroupDesiredCapacity
+      MinSize:
+        Ref: AutoScalingMinSize
+      Tags:
+        - Key: Name
+          PropagateAtLaunch: true
+          Value:
+            Ref: AWS::StackName
+      TargetGroupARNs:
+        - Ref: TargetGroup
+      VPCZoneIdentifier:
+        - Ref: SubnetAPublic
+        - Ref: SubnetBPublic
+    DependsOn:
+      - VPCGatewayAttachment
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        PauseTime: PT10M
+        SuspendProcesses:
+          - HealthCheck
+          - ReplaceUnhealthy
+          - AZRebalance
+          - AlarmNotification
+          - ScheduledActions
+        WaitOnResourceSignals: true
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: routing.http2.enabled
+          Value: "true"
+        - Key: access_logs.s3.enabled
+          Value:
+            Fn::If:
+              - HasAccessLogsBucketName
+              - "true"
+              - "false"
+        - Fn::If:
+            - HasAccessLogsBucketNameAndPrefix
+            - Key: access_logs.s3.prefix
+              Value:
+                Ref: AccessLogsPrefix
+            - Ref: AWS::NoValue
+        - Fn::If:
+            - HasAccessLogsBucketName
+            - Key: access_logs.s3.bucket
+              Value:
+                Ref: AccessLogsBucketName
+            - Ref: AWS::NoValue
+      Scheme: internet-facing
+      SecurityGroups:
+        - Ref: ApiSecurityGroup
+      Subnets:
+        - Ref: SubnetAPublic
+        - Ref: SubnetBPublic
+      Type: application
+    DependsOn:
+      - NetworkAclEntryInPublicAllow8080
+      - NetworkAclEntryInPublicAllowEphemeral
+      - NetworkAclEntryInPublicAllowHTTPS
+      - NetworkAclEntryOutPublicAllow8080
+      - NetworkAclEntryOutPublicAllowEphemeral2
+      - NetworkAclEntryOutPublicAllowEphemeral3
+      - ScanSecurityGroupInApiSecurityGroup
+  HTTPCodeELB5XXTooHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Fn::ImportValue:
+            Fn::Join:
+              - ""
+              - - Ref: BucketAVStackName
+                - -InfrastructureAlarmsTopicArn
+      AlarmDescription: Application load balancer returns 5XX HTTP status codes
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::GetAtt:
+              - LoadBalancer
+              - LoadBalancerFullName
+      EvaluationPeriods: 1
+      MetricName: HTTPCode_ELB_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+  RejectedConnectionCountTooHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Fn::ImportValue:
+            Fn::Join:
+              - ""
+              - - Ref: BucketAVStackName
+                - -InfrastructureAlarmsTopicArn
+      AlarmDescription: Application load balancer rejected connections because the load balancer had reached its maximum number of connections
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::GetAtt:
+              - LoadBalancer
+              - LoadBalancerFullName
+      EvaluationPeriods: 1
+      MetricName: RejectedConnectionCount
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+  HTTPCodeTarget5XXTooHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Fn::ImportValue:
+            Fn::Join:
+              - ""
+              - - Ref: BucketAVStackName
+                - -InfrastructureAlarmsTopicArn
+      AlarmDescription: Application load balancer receives 5XX HTTP status codes from targets
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::GetAtt:
+              - LoadBalancer
+              - LoadBalancerFullName
+        - Name: TargetGroup
+          Value:
+            Fn::GetAtt:
+              - TargetGroup
+              - TargetGroupFullName
+      EvaluationPeriods: 1
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+  TargetConnectionErrorCountTooHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Fn::ImportValue:
+            Fn::Join:
+              - ""
+              - - Ref: BucketAVStackName
+                - -InfrastructureAlarmsTopicArn
+      AlarmDescription: Application load balancer could not connect to targets
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::GetAtt:
+              - LoadBalancer
+              - LoadBalancerFullName
+        - Name: TargetGroup
+          Value:
+            Fn::GetAtt:
+              - TargetGroup
+              - TargetGroupFullName
+      EvaluationPeriods: 1
+      MetricName: TargetConnectionErrorCount
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      CertificateTransparencyLoggingPreference: DISABLED
+      DomainName:
+        Ref: DomainName
+      DomainValidationOptions:
+        - DomainName:
+            Ref: DomainName
+          HostedZoneId:
+            Ref: HostedZoneId
+      ValidationMethod: DNS
+    Condition: HasDnsConfigurationAutoRoute53
+  RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      AliasTarget:
+        DNSName:
+          Fn::Join:
+            - ""
+            - - dualstack.
+              - Fn::GetAtt:
+                  - LoadBalancer
+                  - DNSName
+        HostedZoneId:
+          Fn::GetAtt:
+            - LoadBalancer
+            - CanonicalHostedZoneID
+      HostedZoneId:
+        Ref: HostedZoneId
+      Name:
+        Ref: DomainName
+      Type: A
+    Condition: HasDnsConfigurationAutoRoute53
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+        - CertificateArn:
+            Fn::If:
+              - HasDnsConfigurationManual
+              - Ref: CertificateArn
+              - Ref: Certificate
+      DefaultActions:
+        - FixedResponseConfig:
+            ContentType: application/json
+            MessageBody: '{"statusCode":404,"error":"Not Found"}'
+            StatusCode: "404"
+          Order: 1
+          Type: fixed-response
+      LoadBalancerArn:
+        Ref: LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Order: 1
+          TargetGroupArn:
+            Ref: TargetGroup
+          Type: forward
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /api/v1/scan/sync/download
+              - /api/v1/scan/sync/s3
+              - /api/v1/scan/sync/form
+              - /api/v1/scan/sync/binary
+      ListenerArn:
+        Ref: Listener
+      Priority: 100
+  ScanScaleUp:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      AutoScalingGroupName:
+        Ref: ScanAutoScalingGroup
+      Cooldown: "180"
+      MinAdjustmentMagnitude: 1
+      PolicyType: SimpleScaling
+      ScalingAdjustment: 20
+  ScanScaleDown:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      AutoScalingGroupName:
+        Ref: ScanAutoScalingGroup
+      Cooldown: "180"
+      MinAdjustmentMagnitude: 1
+      PolicyType: SimpleScaling
+      ScalingAdjustment: -10
+  TargetsBusyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: ScanScaleUp
+      AlarmDescription: Don't be worried about this alarm. It is used to trigger auto-scaling policies.
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: http_api_concurrently_accepted
+      Namespace:
+        Ref: AWS::StackName
+      Period: 120
+      Statistic: Average
+      Threshold:
+        Fn::FindInMap:
+          - InstanceTypeMap
+          - Ref: InstanceType
+          - TargetsBusyThreshold
+      TreatMissingData: notBreaching
+  TargetsIdlingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: ScanScaleDown
+      AlarmDescription: Don't be worried about this alarm. It is used to trigger auto-scaling policies.
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 1
+      MetricName: http_api_concurrently_accepted
+      Namespace:
+        Ref: AWS::StackName
+      Period: 120
+      Statistic: Average
+      Threshold:
+        Fn::FindInMap:
+          - InstanceTypeMap
+          - Ref: InstanceType
+          - TargetsIdlingThreshold
+      TreatMissingData: notBreaching
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardBody:
+        Fn::Join:
+          - ""
+          - - '{"start":"-PT24H","widgets":[{"type":"metric","x":0,"y":0,"height":4,"width":18,"properties":{"sparkline":false,"view":"singleValue","metrics":[["AWS/ApplicationELB","RequestCount","LoadBalancer","'
+            - Fn::GetAtt:
+                - LoadBalancer
+                - LoadBalancerFullName
+            - '",{"yAxis":"right","stat":"Sum","label":"API requests"}],["'
+            - Ref: AWS::StackName
+            - '","clean",{"stat":"Sum","label":"Clean"}],[".","infected",{"stat":"Sum","color":"#d62728","label":"Infected"}],[".","no",{"stat":"Sum","color":"#ff7f0e","label":"Unscannable (too big, access denied)"}],[".","scanned_data",{"stat":"Sum","label":"Scanned data (GB)"}]],"region":"'
+            - Ref: AWS::Region
+            - '","title":"bucketAV API (sync) powered by ClamAV (dedicated-public-vpc) - Overview","liveData":true,"setPeriodToTimeRange":true,"trend":false,"singleValueFullPrecision":false}},{"type":"text","x":18,"y":0,"width":6,"height":4,"properties":{"markdown":""}},{"type":"metric","x":0,"y":4,"width":6,"height":6,"properties":{"metrics":[["'
+            - Ref: AWS::StackName
+            - '","clean",{"stat":"Sum","label":"Clean"}],[".","infected",{"stat":"Sum","color":"#d62728","label":"Infected"}],[".","no",{"stat":"Sum","color":"#ff7f0e","label":"Unscannable (too big, access denied)"}]],"view":"timeSeries","stacked":true,"region":"'
+            - Ref: AWS::Region
+            - '","title":"Scan Results","period":60,"liveData":true}},{"type":"metric","x":6,"y":4,"width":6,"height":6,"properties":{"metrics":[["AWS/ApplicationELB","HTTPCode_Target_2XX_Count","LoadBalancer","'
+            - Fn::GetAtt:
+                - LoadBalancer
+                - LoadBalancerFullName
+            - '","TargetGroup","'
+            - Fn::GetAtt:
+                - TargetGroup
+                - TargetGroupFullName
+            - '",{"stat":"Sum","label":"API 2xx responses"}],[".","HTTPCode_Target_3XX_Count",".",".",".",".",{"stat":"Sum","label":"API 3xx responses"}],[".","HTTPCode_Target_4XX_Count",".",".",".",".",{"stat":"Sum","label":"API 4xx responses"}],[".","HTTPCode_Target_5XX_Count",".",".",".",".",{"stat":"Sum","label":"API 5xx responses"}],[".","HTTPCode_ELB_3XX_Count","LoadBalancer","'
+            - Fn::GetAtt:
+                - LoadBalancer
+                - LoadBalancerFullName
+            - '",{"yAxis":"right","stat":"Sum","label":"ALB 3xx responses"}],[".","HTTPCode_ELB_4XX_Count","LoadBalancer","'
+            - Fn::GetAtt:
+                - LoadBalancer
+                - LoadBalancerFullName
+            - '",{"yAxis":"right","stat":"Sum","label":"ALB 4xx responses"}],[".","HTTPCode_ELB_5XX_Count","LoadBalancer","'
+            - Fn::GetAtt:
+                - LoadBalancer
+                - LoadBalancerFullName
+            - '",{"yAxis":"right","stat":"Sum","label":"ALB 5xx responses"}]],"view":"timeSeries","stacked":true,"region":"'
+            - Ref: AWS::Region
+            - '","title":"Load Balancer","period":60,"liveData":true}},{"type":"metric","x":12,"y":4,"width":6,"height":6,"properties":{"metrics":[["AWS/AutoScaling","GroupInServiceInstances","AutoScalingGroupName","'
+            - Ref: ScanAutoScalingGroup
+            - '",{"stat":"Average","label":"Running Instances"}]],"view":"timeSeries","stacked":false,"region":"'
+            - Ref: AWS::Region
+            - '","title":"Scan Fleet","period":60,"liveData":true,"annotations":{"horizontal":[{"label":"AutoScalingMinSize","value":'
+            - Ref: AutoScalingMinSize
+            - '},{"label":"AutoScalingMaxSize","value":'
+            - Ref: AutoScalingMaxSize
+            - '}]}}},{"type":"alarm","x":18,"y":4,"width":6,"height":6,"properties":{"title":"Infrastructure Alarms","alarms":["'
+            - Fn::GetAtt:
+                - SignaturesAgeAlarm
+                - Arn
+            - '","'
+            - Fn::GetAtt:
+                - HTTPCodeELB5XXTooHighAlarm
+                - Arn
+            - '","'
+            - Fn::GetAtt:
+                - RejectedConnectionCountTooHighAlarm
+                - Arn
+            - '","'
+            - Fn::GetAtt:
+                - HTTPCodeTarget5XXTooHighAlarm
+                - Arn
+            - '","'
+            - Fn::GetAtt:
+                - TargetConnectionErrorCountTooHighAlarm
+                - Arn
+            - "\"]}},{\"type\":\"log\",\"x\":0,\"y\":10,\"width\":8,\"height\":8,\"properties\":{\"query\":\"SOURCE '"
+            - Ref: Logs
+            - "' | fields @message | filter @logStream like \\\"/var/log/messages\\\" and @message like \\\"bucketav[\\\" | sort @timestamp desc | limit 1000\",\"region\":\""
+            - Ref: AWS::Region
+            - "\",\"stacked\":false,\"title\":\"Scan Logs\",\"view\":\"table\"}},{\"type\":\"log\",\"x\":8,\"y\":10,\"width\":8,\"height\":8,\"properties\":{\"query\":\"SOURCE '"
+            - Ref: Logs
+            - "' | fields @message | filter not(@logStream like \\\"/var/log/messages\\\" and @message like \\\"bucketav[\\\") | sort @timestamp desc | limit 1000\",\"region\":\""
+            - Ref: AWS::Region
+            - '","stacked":false,"title":"System Logs","view":"table"}},{"type":"text","x":16,"y":10,"width":8,"height":8,"properties":{"markdown":""}},{"type":"metric","x":0,"y":18,"width":6,"height":6,"properties":{"view":"timeSeries","stacked":false,"metrics":[["AWS/EC2","CPUUtilization","AutoScalingGroupName","'
+            - Ref: ScanAutoScalingGroup
+            - '",{"label":"Utilization"}]],"region":"'
+            - Ref: AWS::Region
+            - '","title":"CPU","period":300,"liveData":true,"yAxis":{"left":{"min":0,"max":100}}}},{"type":"metric","x":6,"y":18,"width":6,"height":6,"properties":{"view":"timeSeries","stacked":false,"metrics":[["'
+            - Ref: AWS::StackName
+            - '","mem_used_percent",{"label":"Memory utilization"}],["'
+            - Ref: AWS::StackName
+            - '","swap_used_percent",{"label":"Swap utilization"}]],"region":"'
+            - Ref: AWS::Region
+            - '","title":"Memory","period":300,"liveData":true,"yAxis":{"left":{"min":0,"max":100}}}},{"type":"metric","x":12,"y":18,"width":6,"height":6,"properties":{"view":"timeSeries","stacked":false,"metrics":[["'
+            - Ref: AWS::StackName
+            - '","disk_used_percent","path","/","fstype","xfs",{"label":"Storage utilization"}],[{"expression":"(wops+rops)/300","label":"IOPS","id":"e1","yAxis":"right"}],["AWS/EC2","EBSWriteOps","AutoScalingGroupName","'
+            - Ref: ScanAutoScalingGroup
+            - '",{"id":"wops","stat":"Sum","visible":false}],["AWS/EC2","EBSReadOps","AutoScalingGroupName","'
+            - Ref: ScanAutoScalingGroup
+            - '",{"id":"rops","stat":"Sum","visible":false}],[{"expression":"(w+r)/300/1024/1024","label":"Throughput (MiB/s)","id":"e2","yAxis":"right"}],["AWS/EC2","EBSWriteBytes","AutoScalingGroupName","'
+            - Ref: ScanAutoScalingGroup
+            - '",{"id":"w","stat":"Sum","visible":false}],["AWS/EC2","EBSReadBytes","AutoScalingGroupName","'
+            - Ref: ScanAutoScalingGroup
+            - '",{"id":"r","stat":"Sum","visible":false}]],"region":"'
+            - Ref: AWS::Region
+            - '","title":"Disk","period":300,"liveData":true,"yAxis":{"left":{"min":0,"max":100}}}},{"type":"metric","x":18,"y":18,"width":6,"height":6,"properties":{"view":"timeSeries","stacked":true,"metrics":[[{"expression":"(in+out)/300*8/1000/1000/1000","label":"Throughput (Gbit/s)","id":"e1"}],["AWS/EC2","NetworkIn","AutoScalingGroupName","'
+            - Ref: ScanAutoScalingGroup
+            - '",{"id":"in","stat":"Sum","visible":false}],["AWS/EC2","NetworkOut","AutoScalingGroupName","'
+            - Ref: ScanAutoScalingGroup
+            - '",{"id":"out","stat":"Sum","visible":false}]],"region":"'
+            - Ref: AWS::Region
+            - '","title":"Network","period":300,"liveData":true,"yAxis":{"left":{"showUnits":false}}}}]}'
+      DashboardName:
+        Fn::Join:
+          - ""
+          - - Ref: AWS::StackName
+            - "-"
+            - Ref: AWS::Region
+  ServiceDiscoveryVersion:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: bucketAV managed value. DO NOT CHANGE!
+      Name:
+        Fn::Join:
+          - ""
+          - - /bucketAV/
+            - Ref: BucketAVStackName
+            - /AddOn/api-sync/
+            - Ref: AWS::StackName
+            - /Version
+      Type: String
+      Value: 2.6.0
+Mappings:
+  RegionMap:
+    af-south-1:
+      AMI: ami-07abb4e4ef27f54b4
+    ap-east-1:
+      AMI: ami-05b9fe6faf234a45d
+    ap-northeast-1:
+      AMI: ami-026f7a06b5aee3f57
+    ap-northeast-2:
+      AMI: ami-0de17c50b8a5fe9a0
+    ap-northeast-3:
+      AMI: ami-05be769157eb38a0d
+    ap-south-1:
+      AMI: ami-0a7e93ed82ef54b49
+    ap-south-2:
+      AMI: ami-04062ef783709cbdf
+    ap-southeast-1:
+      AMI: ami-0d1846ad4c2a666e3
+    ap-southeast-2:
+      AMI: ami-055872bb1d3966cff
+    ap-southeast-3:
+      AMI: ami-00d5172362611546a
+    ap-southeast-4:
+      AMI: ami-058641f3733564965
+    ca-central-1:
+      AMI: ami-0be3b41e9561807aa
+    ca-west-1:
+      AMI: ami-027c143ca9637bd93
+    eu-central-1:
+      AMI: ami-05602ca1ff638710c
+    eu-central-2:
+      AMI: ami-02c61bbf79a86ce2a
+    eu-north-1:
+      AMI: ami-0fb43683fc7a23a81
+    eu-south-1:
+      AMI: ami-03246db7e28181f44
+    eu-south-2:
+      AMI: ami-0db4db0cc748a8a1d
+    eu-west-1:
+      AMI: ami-0305ee795a49d954d
+    eu-west-2:
+      AMI: ami-0faf3fd664c11f83d
+    eu-west-3:
+      AMI: ami-0f793e3ca21f1e194
+    il-central-1:
+      AMI: ami-0c2e363ea46af5fc6
+    me-central-1:
+      AMI: ami-07c5e33d0c87ac4c3
+    me-south-1:
+      AMI: ami-0f92e0f2c1bf63c09
+    sa-east-1:
+      AMI: ami-025cfaa088ef0fa48
+    us-east-1:
+      AMI: ami-0a8753a59fb05d9e4
+    us-east-2:
+      AMI: ami-092f899841c3ee87b
+    us-west-1:
+      AMI: ami-03e73a154379e276b
+    us-west-2:
+      AMI: ami-0ebc5cdd9c1169e7b
+  InstanceTypeMap:
+    t3a.small:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    t3a.medium:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    t3a.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    t3a.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    t3a.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    t3.small:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    t3.medium:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    t3.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    t3.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    t3.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.medium:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.32xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7a.48xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7i.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7i.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7i.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7i.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7i.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7i.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7i.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7i.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m7i.48xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6a.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6a.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6a.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6a.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6a.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6a.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6a.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6a.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6a.32xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6a.48xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6i.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6i.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6i.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6i.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6i.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6i.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6i.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6i.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m6i.32xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5a.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5a.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5a.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5a.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5a.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5a.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5a.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5a.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m5.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m4.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m4.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m4.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m4.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m4.10xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    m4.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.medium:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.32xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7a.48xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7i.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7i.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7i.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7i.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7i.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7i.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7i.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7i.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c7i.48xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6a.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6a.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6a.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6a.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6a.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6a.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6a.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6a.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6a.32xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6a.48xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6i.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6i.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6i.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6i.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6i.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6i.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6i.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6i.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c6i.32xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5a.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5a.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5a.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5a.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5a.8xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5a.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5a.16xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5a.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5.large:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5.xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5.2xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5.4xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5.9xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5.12xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5.18xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+    c5.24xlarge:
+      TargetsBusyThreshold: "2"
+      TargetsIdlingThreshold: "1"
+Outputs:
+  Engine:
+    Description: bucketAV engine.
+    Value: clamav
+  FulfillmentOption:
+    Description: Fulfillment option.
+    Value: dedicated-public-vpc
+  RoleArn:
+    Description: The ARN of the IAM Role attached to the EC2 instances powering the API.
+    Value:
+      Fn::GetAtt:
+        - ScanIAMRole
+        - Arn
+    Export:
+      Name:
+        Fn::Join:
+          - ""
+          - - Ref: AWS::StackName
+            - -RoleArn
+  AutoScalingGroupName:
+    Description: Name of the ASG powering the API.
+    Value:
+      Ref: ScanAutoScalingGroup
+  LoadBalancerDnsName:
+    Description: DNS name of the Application Load Balancer required to configure Route 53 Alias record.
+    Value:
+      Fn::GetAtt:
+        - LoadBalancer
+        - DNSName
+  AddOn:
+    Description: bucketAV add-on.
+    Value: api-sync
+  Version:
+    Description: bucketAV add-on version.
+    Value: 2.6.0
+  StackName:
+    Description: Stack name.
+    Value:
+      Ref: AWS::StackName

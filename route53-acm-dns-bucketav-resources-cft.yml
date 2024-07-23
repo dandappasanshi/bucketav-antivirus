@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  Environment:
+    Type: String
+    Description: Environment alias or stage (e.g., dev, test, prod)
+    Default: bucketav
+  ALBCanonicalHostedZoneID:
+    Type: String
+    Description: ALB CanonicalHostedZoneID of bucketav
+    Default: ""
+  ALBDNSName:
+    Type: String
+    Description: DNS name Application load balancer name of bucketav
+    Default: ""
+  Prefix:
+    Type: String
+    Default: 'wci-reg-bucketav'
+  RegistryDomain:
+    Type: String
+    Default: wci-registry.org
+  VpcId:
+    Type: String
+    Description: Name for the Target Group
+    Default: "vpc-0ac188bd02fcd33aa"
+  VpcRegion:
+    Type: String
+    Description: Name for the Target Group
+    Default: "us-west-2"
+
+Resources:
+  PrivateHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Sub "private.${Environment}.${RegistryDomain}"    # bucketav.private.bucketav.wci-registry.org
+      VPCs:
+        - VPCId: !Ref VpcId
+          VPCRegion: !Ref VpcRegion
+      HostedZoneConfig:
+        Comment: "WCI Private hosted zone for BucketAv Environment"
+
+# Enable this below code in new AWS account only not in existing AWS account if already created.         
+  PublicHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Sub "${Environment}.${RegistryDomain}"             # bucketav.wci-registry.org
+      HostedZoneConfig:
+        Comment: "WCI Public hosted zone for BucketAv Environment"
+
+  # Certificate:
+  #   Type: 'AWS::CertificateManager::Certificate'
+  #   DependsOn:
+  #        - "PrivateHostedZone"
+  #   Properties:
+  #     DomainName: !Sub "bucketav.private.${RegistryDomain}"
+  #     CertificateTransparencyLoggingPreference: DISABLED
+  #     DomainValidationOptions:
+  #       - DomainName: !Sub "bucketav.private.${RegistryDomain}"
+  #         HostedZoneId: !Ref PublicHostedZone # Use the ID of the PrivateHostedZone
+  #     ValidationMethod: DNS
+  #     Tags:
+  #       - Key: Name
+  #         Value: Bucketav-ACMCertificate
+
+  # DomainNameRecordSet:
+  #   Type: AWS::Route53::RecordSet
+  #   DependsOn:
+  #        - "PrivateHostedZone"
+  #   Properties:
+  #     HostedZoneId: !Ref PrivateHostedZone
+  #     Name: !Sub "bucketav.private.${RegistryDomain}"
+  #     Type: A
+  #     AliasTarget:
+  #       HostedZoneId: !Ref ALBCanonicalHostedZoneID
+  #       DNSName: !Ref ALBDNSName
+  BucketAVApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: !Sub "${Prefix}-ApiKey"
+      Enabled: true
+      Description: API Key for BucketAv
+      # StageKeys:
+      #   - RestApiId: !Ref MyRestApi
+      #     StageName: !Ref MyStage
+Outputs:
+  BucketAVApiKeyValue:
+    Description: "BucketAV API Key Value"
+    Value: !Ref BucketAVApiKey
+    Export:
+      Name: !Sub "${Environment}-BucketAVApiKey-Value"
+
+  PrivateHostedZoneId:
+    Description: "ID of the private hosted zone"
+    Value: !Ref PrivateHostedZone
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateHostedZoneId"
+
+  PublicHostedZoneId:
+    Description: "ID of the public hosted zone"
+    Value: !Ref PublicHostedZone
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicHostedZoneId"
+
+#   CertificateARN:
+#     Description: "ID of the ACM Certificate"
+#     Value: !Ref Certificate
+#     Export:
+#       Name: CertificateARN

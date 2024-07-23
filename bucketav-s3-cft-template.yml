@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  Environment:
+    Type: String
+    Description: Environment alias or stage (e.g., dev, test, prod)
+    Default: bucketav
+  Project:
+    Type: String
+    Description: Environment alias or stage (e.g., dev, test, prod)
+    Default: wci-reg-bucketav
+  BucketName:
+    Description: 'The name of the S3 bucket to store the BucketAv cft.'
+    Type: String
+    Default: 'wci-reg-bucketav-cft'
+    AllowedPattern: '^[a-z0-9.-]{3,63}$'
+    ConstraintDescription: 'The bucket name must be between 3 and 63 characters long and can contain only lowercase letters, numbers, periods, and hyphens.'
+
+Resources:
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref BucketName
+      AccessControl: Private  # Options: Private, PublicRead, PublicReadWrite, AuthenticatedRead
+      VersioningConfiguration:
+        Status: Enabled  # Options: Enabled, Suspended
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'TransitionToIA'
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+            ExpirationInDays: 365
+      Tags:
+        - Key: 'Environment'
+          Value: !Ref Environment
+        - Key: 'Project'
+          Value: !Ref Project
+Outputs:
+  BucketName:
+    Description: 'Name of the S3 bucket for storing the BucketAv CFT.'
+    Value: !Ref S3Bucket
+  BucketArn:
+    Description: 'ARN of the S3 bucket'
+    Value: !GetAtt S3Bucket.Arn
